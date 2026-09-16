@@ -20,6 +20,9 @@ import onnxruntime as ort
 from forensics import ZERO_HASH, generate_block, export_certificate, save_certificate
 from generate_pdf import generate_pdf
 import database
+import io
+import base64
+from forensic_visualizer import compute_forensic_indicators, generate_mel_forensic_plot
 
 HOST = "0.0.0.0"
 PORT = 8080
@@ -242,12 +245,21 @@ async def process_audio_track(track, pc_id: str):
                 forensic_chain.append(entry)
                 frame_counter += 1
 
+                # Calculate real-time Mel spectrogram reasons & forensic indicators
+                analysis = compute_forensic_indicators(current_audio, sr=16000, model_score=score)
+
                 telemetry_payload = {
                     "type": "telemetry",
                     "sessionId": pc_id,
                     "timestamp": entry["timestamp"],
                     "score": entry["score"],
+                    "overall_risk_score": analysis["overall_risk_score"],
                     "risk_tier": entry["risk_tier"],
+                    "risk_level": analysis["risk_level"],
+                    "classification": analysis["classification"],
+                    "confidence": analysis["confidence"],
+                    "indicators": analysis["indicators"],
+                    "key_flags": analysis["key_flags"],
                     "packet_loss": telemetry["loss_rate"],
                     "jitter": telemetry["jitter"],
                     "noise_level": telemetry["noise_level"],
@@ -722,6 +734,80 @@ async def post_activity_handler(request):
     except Exception as e:
         return web.json_response({"success": False, "error": f"Failed to record activity: {e}"}, status=500)
 
+
+async def analyze_audio_handler(request):
+    """
+    POST /api/analyze-audio endpoint:
+    Accepts multipart/form-data audio file or raw audio.
+    Computes standardized waveform, log-mel spectrogram, 4-tier forensic indicator breakdown,
+    and returns both the structured metrics and the high-res base64 visualization plot.
+    """
+    try:
+        audio_bytes = None
+        filename = "uploaded_audio.wav"
+
+        if request.content_type.startswith("multipart/"):
+            reader = await request.multipart()
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name == "file":
+                    filename = part.filename or "uploaded_audio.wav"
+                    audio_bytes = await part.read(decode=False)
+                    break
+        else:
+            try:
+                body = await request.json()
+                if "audio_base64" in body:
+                    audio_bytes = base64.b64decode(body["audio_base64"])
+                    filename = body.get("filename", "uploaded_audio.wav")
+            except Exception:
+                audio_bytes = await request.read()
+
+        if not audio_bytes or len(audio_bytes) == 0:
+            return web.json_response({"success": False, "error": "No audio file provided."}, status=400)
+
+        # Load audio into numpy array (16kHz mono)
+        with io.BytesIO(audio_bytes) as bio:
+            audio_np, sr = librosa.load(bio, sr=16000, mono=True)
+
+        if len(audio_np) == 0:
+            return web.json_response({"success": False, "error": "Audio file is empty or unreadable."}, status=400)
+
+        # ONNX inference
+        input_tensor = extract_mel_spectrogram(audio_np)
+        raw_score = run_inference(input_tensor)
+
+        # Calculate indicators in exact requested format
+        analysis = compute_forensic_indicators(audio_np, sr=16000, model_score=raw_score)
+
+        # Generate exact 3-panel figure
+        plot_b64 = generate_mel_forensic_plot(
+            audio_np=audio_np,
+            sr=16000,
+            overall_score=analysis["overall_risk_score"],
+            indicators=analysis["indicators"],
+            key_flags=analysis["key_flags"]
+        )
+
+        return web.json_response({
+            "success": True,
+            "name": filename,
+            "duration": round(float(len(audio_np) / 16000.0), 2),
+            "score": int(round(analysis["overall_risk_score"])),
+            "overall_risk_score": analysis["overall_risk_score"],
+            "risk_level": analysis["risk_level"],
+            "classification": analysis["classification"],
+            "confidence": analysis["confidence"],
+            "indicators": analysis["indicators"],
+            "key_flags": analysis["key_flags"],
+            "plot_image": f"data:image/png;base64,{plot_b64}"
+        })
+    except Exception as e:
+        print(f"[ANALYZE ERROR] {e}")
+        return web.json_response({"success": False, "error": f"Audio analysis failed: {str(e)}"}, status=500)
+
 async def me_handler(request):
     return web.json_response({
         "status": "online",
@@ -756,6 +842,7 @@ def create_app():
     # Activity & Call logs (Supabase)
     app.router.add_get("/api/activity", get_activity_handler)
     app.router.add_post("/api/activity", post_activity_handler)
+    app.router.add_post("/api/analyze-audio", analyze_audio_handler)
 
     # WebRTC & Telemetry routes
     app.router.add_post("/offer", offer)

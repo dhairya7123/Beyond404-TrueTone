@@ -7,3 +7,4 @@ soundfile
 reportlab
 psycopg2-binary
 asyncpg
+matplotlib

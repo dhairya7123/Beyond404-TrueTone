@@ -90,6 +90,21 @@ export default function CallProgress({ caller = {}, onEnd, liveTelemetry }) {
       if (liveTelemetry.current_hash) {
         setCurrentHash(liveTelemetry.current_hash);
       }
+      if (liveTelemetry.indicators) {
+        setIndicators(liveTelemetry.indicators);
+      }
+      if (liveTelemetry.key_flags) {
+        setKeyFlags(liveTelemetry.key_flags);
+      }
+      if (liveTelemetry.classification) {
+        setClassification(liveTelemetry.classification);
+      }
+      if (liveTelemetry.confidence) {
+        setConfidence(liveTelemetry.confidence);
+      }
+      if (liveTelemetry.risk_level) {
+        setRiskLevel(liveTelemetry.risk_level);
+      }
     }
   }, [liveTelemetry]);
 
@@ -422,18 +437,50 @@ export default function CallProgress({ caller = {}, onEnd, liveTelemetry }) {
         </div>
 
         <div className="neu-card p-6">
-          <div className="text-sm font-bold text-slate-900 mb-4">Real-Time Spectral Reasons</div>
-          <div className="flex flex-col gap-2.5">
-            {reasons.map((r, i) => (
-              <div key={i} className="flex items-start gap-2.5 text-xs">
-                {r.status === "pass" && <CheckCircle2 size={15} className="text-emerald-500 shrink-0 mt-0.5" />}
-                {r.status === "warn" && <AlertTriangle size={15} className="text-amber-500 shrink-0 mt-0.5" />}
-                {r.status === "fail" && <ShieldAlert size={15} className="text-red-500 shrink-0 mt-0.5" />}
-                <span className={r.status === "fail" ? "text-red-700 font-medium" : "text-slate-600"}>
-                  {r.text}
-                </span>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm font-bold text-slate-900">Forensic Indicator Breakdown</span>
+            <span className="text-[11px] font-bold text-slate-400">Anomaly Index (%)</span>
+          </div>
+
+          <div className="space-y-3 mb-5">
+            {Object.entries(indicators).map(([k, val]) => (
+              <div key={k}>
+                <div className="flex justify-between text-xs font-medium mb-1">
+                  <span className="text-slate-600">{k}</span>
+                  <span className="text-slate-900 font-bold">{val}%</span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      val > 40 ? "bg-red-500" : val > 20 ? "bg-amber-500" : "bg-emerald-500"
+                    }`}
+                    style={{ width: `${Math.min(100, Math.max(3, val))}%` }}
+                  />
+                </div>
               </div>
             ))}
+          </div>
+
+          {/* Summary Box matching user specification */}
+          <div className="p-3.5 rounded-2xl border-2 border-red-500 bg-red-50/25">
+            <div className="font-mono text-xs font-bold text-slate-900">
+              OVERALL RISK SCORE: {pct} / 100
+            </div>
+            <div className="font-mono text-xs text-slate-700 mt-0.5">
+              RISK LEVEL: {pct >= 67 ? "HIGH" : pct >= 34 ? "MEDIUM" : "LOW"}
+            </div>
+            <div className="font-mono text-xs text-slate-700">
+              CLASSIFICATION: {pct >= 50 ? "AI_GENERATED" : "GENUINE"}
+            </div>
+            <div className="font-mono text-xs text-slate-700">
+              CONFIDENCE: {confidence}%
+            </div>
+            <div className="mt-2 font-mono text-xs font-semibold text-slate-900">Key Flags:</div>
+            <ul className="text-xs text-slate-600 space-y-0.5 mt-0.5 font-mono">
+              {keyFlags.map((flag, idx) => (
+                <li key={idx}>• {flag}</li>
+              ))}
+            </ul>
           </div>
         </div>
 
