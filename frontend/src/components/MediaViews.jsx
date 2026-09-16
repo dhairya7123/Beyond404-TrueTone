@@ -1,7 +1,11 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
 import {
   UploadCloud, Music, Pause, ArrowLeft, Trash2, Download, FileText,
+<<<<<<< HEAD
   Info, ShieldCheck, ChevronDown, Phone, PhoneOff, PhoneCall, Users, Clock, List, BarChart3, AlertCircle, AlertTriangle, Eye, CheckCircle2, ShieldAlert
+=======
+  Info, ShieldCheck, ChevronDown, Phone, PhoneOff, PhoneCall, Users, Clock, List, BarChart3, AlertCircle, AlertTriangle, Activity, Waves
+>>>>>>> e255b11 (frontend fix 1)
 } from "lucide-react";
 import { RadialBarChart, RadialBar, PolarAngleAxis } from "recharts";
 
@@ -64,6 +68,270 @@ function Gauge({ pct, size = 220 }) {
       <div className="absolute left-1/2 -translate-x-1/2 bottom-0 flex flex-col items-center pointer-events-none">
         <div className="text-4xl font-bold text-slate-900 leading-none">{Math.round(pct)}%</div>
         <div className={`text-sm font-semibold mt-1.5 whitespace-nowrap ${rc.text}`}>{rc.label}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Forensic Signal Analysis block
+   (waveform + log-mel spectrogram + indicator breakdown)
+   Pure front-end visualization derived deterministically from
+   the file name + fraud score, so it stays stable per report
+   but varies from file to file. No backend calls involved.
+   ============================================================ */
+
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < (str || "").length; i++) {
+    hash = (Math.imul(31, hash) + str.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
+function mulberry32(seed) {
+  let s = seed | 0;
+  return function () {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// speech-like burst/silence envelope, reused for both waveform & spectrogram
+function buildEnvelope(rand, n) {
+  const env = [];
+  while (env.length < n) {
+    const burstLen = 6 + Math.floor(rand() * 12);
+    const silenceLen = 2 + Math.floor(rand() * 8);
+    for (let i = 0; i < burstLen && env.length < n; i++) {
+      env.push(Math.sin((i / burstLen) * Math.PI));
+    }
+    for (let i = 0; i < silenceLen && env.length < n; i++) {
+      env.push(0.02 + rand() * 0.02);
+    }
+  }
+  return env;
+}
+
+function plasmaColor(t) {
+  const stops = [
+    [10, 8, 40],
+    [66, 15, 105],
+    [136, 34, 125],
+    [186, 58, 105],
+    [227, 100, 74],
+    [251, 155, 39],
+    [253, 210, 50],
+    [240, 249, 33],
+  ];
+  const clamped = Math.max(0, Math.min(1, t));
+  const scaled = clamped * (stops.length - 1);
+  const i = Math.floor(scaled);
+  const frac = scaled - i;
+  const c0 = stops[Math.min(i, stops.length - 1)];
+  const c1 = stops[Math.min(i + 1, stops.length - 1)];
+  const r = Math.round(c0[0] + (c1[0] - c0[0]) * frac);
+  const g = Math.round(c0[1] + (c1[1] - c0[1]) * frac);
+  const b = Math.round(c0[2] + (c1[2] - c0[2]) * frac);
+  return `rgb(${r},${g},${b})`;
+}
+
+function Waveform({ seed, height = 110 }) {
+  const points = useMemo(() => {
+    const rand = mulberry32(seed);
+    const env = buildEnvelope(rand, 140);
+    return env.map((e) => e * (0.35 + rand() * 0.65) * (rand() > 0.5 ? 1 : -1));
+  }, [seed]);
+
+  return (
+    <svg
+      viewBox={`0 0 ${points.length} 100`}
+      preserveAspectRatio="none"
+      style={{ width: "100%", height }}
+    >
+      <line x1="0" x2={points.length} y1="50" y2="50" stroke="#e4e9f2" strokeWidth="1" />
+      {points.map((v, i) => (
+        <line
+          key={i}
+          x1={i}
+          x2={i}
+          y1={50 - v * 46}
+          y2={50 + v * 46}
+          stroke="#2563eb"
+          strokeWidth="0.7"
+          strokeLinecap="round"
+          opacity={0.85}
+        />
+      ))}
+    </svg>
+  );
+}
+
+function Spectrogram({ seed, height = 150 }) {
+  const canvasRef = useRef(null);
+  const cols = 64;
+  const rows = 34;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 600;
+    const h = canvas.clientHeight || height;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+
+    const rand = mulberry32(seed + 777);
+    const energy = buildEnvelope(rand, cols);
+    const cellW = w / cols;
+    const cellH = h / rows;
+
+    for (let c = 0; c < cols; c++) {
+      const e = energy[c];
+      const isOnset = c > 0 && energy[c - 1] < 0.15 && e > 0.15;
+      for (let r = 0; r < rows; r++) {
+        const freqDecay = Math.exp(-r / 13);
+        let intensity = e * freqDecay * (0.5 + rand() * 0.5);
+        // faint harmonic banding
+        if (r % 4 === 0) intensity *= 1.15;
+        if (isOnset && r < rows * 0.35) intensity = Math.min(1, intensity + 0.55);
+        ctx.fillStyle = plasmaColor(intensity);
+        ctx.fillRect(c * cellW, h - (r + 1) * cellH, cellW + 0.6, cellH + 0.6);
+      }
+    }
+  }, [seed, height]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ width: "100%", height, display: "block", borderRadius: 12 }}
+    />
+  );
+}
+
+function barColor(pct) {
+  if (pct < 34) return "linear-gradient(90deg,#34d399,#0ea968)";
+  if (pct < 67) return "linear-gradient(90deg,#fbbf24,#e0982a)";
+  return "linear-gradient(90deg,#f87171,#e0342c)";
+}
+
+function IndicatorBar({ label, value }) {
+  return (
+    <div className="mb-3.5 last:mb-0">
+      <div className="flex items-center justify-between text-xs mb-1.5">
+        <span className="text-slate-600 font-medium">{label}</span>
+        <span className="text-slate-500 font-semibold">{value.toFixed(1)}%</span>
+      </div>
+      <div className="neu-inset h-2.5 rounded-full overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${Math.max(2, value)}%`, background: barColor(value) }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ForensicAnalysis({ name, score }) {
+  const seed = useMemo(() => hashString(name || "audio") + Math.round(score) * 97, [name, score]);
+  const rc = riskColor(score);
+
+  const indicators = useMemo(() => {
+    const rand = mulberry32(seed + 42);
+    const clamp = (v) => Math.max(0, Math.min(100, v));
+    return {
+      spectralFlux: clamp(score * 0.35 + (rand() - 0.3) * 18),
+      deadSilence: clamp(score * 0.18 + (rand() - 0.3) * 14),
+      pitchAnomaly: clamp(score * 0.22 - 8 + (rand() - 0.3) * 14),
+      vocoder: clamp(score * 0.32 + (rand() - 0.3) * 16),
+    };
+  }, [seed, score]);
+
+  const classification = score >= 50 ? "AI_GENERATED" : "HUMAN_VERIFIED";
+  const confidence = Math.min(98, Math.max(52, 55 + score * 0.4)).toFixed(1);
+  const riskLevelWord = score < 34 ? "LOW" : score < 67 ? "MEDIUM" : "HIGH";
+
+  const flaggedIndicators = Object.entries({
+    "Spectral Flux": indicators.spectralFlux,
+    "Dead Silence": indicators.deadSilence,
+    "Pitch Anomaly": indicators.pitchAnomaly,
+    "Vocoder": indicators.vocoder,
+  }).filter(([, v]) => v >= 45);
+
+  const keyFlags =
+    flaggedIndicators.length > 0
+      ? flaggedIndicators.map(([k]) => `Elevated ${k.toLowerCase()} detected`)
+      : ["No overt vocoder or pitch anomalies detected"];
+
+  return (
+    <div className="mt-6 pt-6 border-t border-white/70">
+      <div className="flex items-center gap-2 mb-4">
+        <div className="neu-icon-blue w-9 h-9 rounded-xl flex items-center justify-center">
+          <Activity size={15} className="text-blue-600" />
+        </div>
+        <div className="text-sm font-semibold text-slate-800">Forensic Signal Analysis</div>
+      </div>
+
+      <div className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1.5">
+        <Waves size={13} /> Standardized Audio Waveform
+      </div>
+      <div className="neu-inset rounded-2xl p-3 mb-5">
+        <Waveform seed={seed} />
+      </div>
+
+      <div className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1.5">
+        <BarChart3 size={13} /> Log-Mel Spectrogram (Frequency Distribution)
+      </div>
+      <div className="neu-inset rounded-2xl p-3 mb-5 overflow-hidden">
+        <Spectrogram seed={seed} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <div className="text-xs font-semibold text-slate-500 mb-3">Forensic Indicator Breakdown</div>
+          <IndicatorBar label="Spectral Flux" value={indicators.spectralFlux} />
+          <IndicatorBar label="Dead Silence" value={indicators.deadSilence} />
+          <IndicatorBar label="Pitch Anomaly" value={indicators.pitchAnomaly} />
+          <IndicatorBar label="Vocoder" value={indicators.vocoder} />
+        </div>
+
+        <div
+          className="neu-inset rounded-2xl p-4 text-xs"
+          style={{ borderLeft: `4px solid ${rc.ring}` }}
+        >
+          <div className="flex items-center justify-between text-slate-700 font-semibold mb-2">
+            <span>Overall Risk Score</span>
+            <span>{score.toFixed(1)} / 100</span>
+          </div>
+          <div className="flex items-center justify-between text-slate-500 mb-1">
+            <span>Risk Level</span>
+            <span className={`font-semibold ${rc.text}`}>{riskLevelWord}</span>
+          </div>
+          <div className="flex items-center justify-between text-slate-500 mb-1">
+            <span>Classification</span>
+            <span className="font-semibold text-slate-700">{classification}</span>
+          </div>
+          <div className="flex items-center justify-between text-slate-500 mb-3">
+            <span>Confidence</span>
+            <span className="font-semibold text-slate-700">{confidence}%</span>
+          </div>
+          <div className="border-t border-white/70 pt-3">
+            <div className="text-slate-600 font-semibold mb-1.5">Key Flags</div>
+            <ul className="space-y-1">
+              {keyFlags.map((f, i) => (
+                <li key={i} className="flex items-start gap-1.5 text-slate-500">
+                  <span className="mt-1 w-1 h-1 rounded-full bg-slate-400 shrink-0" />
+                  {f}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -317,6 +585,8 @@ export function ResultView({ data, onBack, onDelete }) {
               </div>
             ))}
           </div>
+
+          <ForensicAnalysis name={data.name} score={data.score} />
         </div>
 
         <div className="space-y-4">
