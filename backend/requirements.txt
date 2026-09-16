@@ -1,0 +1,9 @@
+aiohttp
+aiortc
+onnxruntime
+librosa
+numpy
+soundfile
+reportlab
+psycopg2-binary
+asyncpg

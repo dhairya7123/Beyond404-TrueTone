@@ -1,0 +1,120 @@
+BEYOND404 FORENSIC MODULE HANDOVER
+==================================
+
+Purpose
+-------
+This module creates tamper-evident forensic records for the voice-cloning
+detection system.
+
+The module connects audio-frame information, AI risk scores, timestamps,
+and network telemetry into a SHA-256 hash chain.
+
+Files
+-----
+forensics.py
+    Main forensic logic:
+    - Audio-frame hashing
+    - Forensic block creation
+    - Hash-chain generation
+    - Certificate generation
+    - Chain verification
+
+audio_hash.py
+    Utility for splitting 16 kHz mono 16-bit WAV audio into 20 ms frames
+    and generating SHA-256 hashes for those frames.
+
+generate_pdf.py
+    Converts forensic_certificate.json into a PDF certificate.
+
+verify_certificate.py
+    Loads and verifies a saved JSON certificate.
+
+integration_example.py
+    Demonstrates how the backend can send audio and risk information
+    to the forensic module.
+
+test_forensics.py
+    Tests hash generation, certificate generation, and tamper detection.
+
+Backend Input
+-------------
+The backend should provide the following information for every audio frame:
+
+- Raw 20 ms PCM audio frame as bytes
+- Frame index
+- Frame timestamp
+- AI risk score
+- Risk tier
+- Packet loss
+- Jitter
+- Codec
+- PLC or NetEQ status
+
+Example
+-------
+new_hash, entry = generate_block(
+    prev_hash=previous_hash,
+    timestamp=timestamp,
+    score=risk_score,
+    risk_tier=risk_tier,
+    telemetry={
+        "packet_loss": packet_loss,
+        "jitter_ms": jitter_ms,
+        "codec": codec,
+        "plc_status": plc_status
+    },
+    audio_frame=audio_frame,
+    frame_index=frame_index
+)
+
+The returned new_hash becomes the prev_hash for the next frame.
+
+Certificate Workflow
+--------------------
+1. Receive a 20 ms audio frame.
+2. Generate the audio-frame SHA-256 hash.
+3. Add the AI score and network telemetry.
+4. Create a forensic block.
+5. Link the block to the previous hash.
+6. Save the complete certificate as JSON.
+7. Generate a PDF certificate if required.
+8. Verify the certificate before presenting it as evidence.
+
+Commands
+--------
+Run the forensic test:
+
+python test_forensics.py
+
+Create a sample certificate:
+
+python integration_example.py
+
+Generate the PDF:
+
+python generate_pdf.py
+
+Verify the certificate:
+
+python verify_certificate.py
+
+Important Integration Notes
+---------------------------
+This module does not create or manage the live WebRTC connection.
+
+The main backend team is responsible for:
+
+- WebRTC and aiortc
+- Opus decoding
+- Conversion to 16 kHz mono PCM
+- Voice activity detection
+- LFCC and MFCC feature extraction
+- ONNX model inference
+- Risk calibration
+- Packet-loss and jitter simulation
+- Redis and PostgreSQL storage
+- FastAPI routes
+- Docker deployment
+
+The forensic module only records and verifies the information supplied by
+the backend.
