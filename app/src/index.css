@@ -1,0 +1,290 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Design language: "soft UI" — a mix of flat cards and neumorphism.
+  Cards are near-white (not the exact page colour), so they read as
+  distinct surfaces the way the reference mockup does, but they keep a
+  two-tone shadow (dark bottom-right, light top-left) for a touch of
+  depth instead of a single flat drop shadow. Full carved insets are
+  reserved for a couple of places (active nav pill, slider tracks) —
+  used sparingly, not on every input.
+*/
+
+@layer base {
+  :root {
+    --page-bg: #eef1f7;
+    --sidebar-bg: #e6eaf2;
+    --surface: #ffffff;
+    --surface-soft: rgba(255, 255, 255, 0.85);
+
+    --sd-dark: rgba(163, 177, 198, 0.35);
+    --sd-dark-weak: rgba(163, 177, 198, 0.2);
+    --sd-light: rgba(255, 255, 255, 0.8);
+
+    --orbit-blue: #2563eb;
+    --orbit-red: #ef4444;
+    --orbit-amber: #f5b528;
+    --orbit-green: #10b981;
+    --orbit-ink: #0f172a;
+  }
+
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--page-bg);
+    color: var(--orbit-ink);
+    font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--orbit-blue);
+    outline-offset: 3px;
+    border-radius: 12px;
+  }
+
+  button {
+    font: inherit;
+    cursor: pointer;
+    background: none;
+    border: none;
+  }
+  button:disabled {
+    cursor: default;
+  }
+
+  table {
+    border-collapse: collapse;
+  }
+}
+
+@layer components {
+  /* ---------- Cards: flat surface + soft two-tone shadow ---------- */
+
+  .neu-card {
+    background: var(--surface-soft);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    border-radius: 24px;
+    box-shadow:
+      6px 6px 18px var(--sd-dark-weak),
+      -6px -6px 18px var(--sd-light);
+  }
+
+  .neu-card-sm {
+    background: var(--surface-soft);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    border-radius: 16px;
+    box-shadow:
+      4px 4px 10px var(--sd-dark-weak),
+      -4px -4px 10px var(--sd-light);
+  }
+
+  /* Gentle recessed well — for inputs, dropzones, slider tracks.
+     Kept subtle on purpose: a fully carved inset reads as "pure
+     neumorphism", which is the thing to avoid here. */
+  .neu-inset {
+    background: rgba(255, 255, 255, 0.6);
+    border: 1px solid #e4e9f2;
+    border-radius: 16px;
+    box-shadow: inset 2px 2px 5px var(--sd-dark-weak);
+  }
+
+  .neu-circle {
+    background: var(--surface);
+    border: 1px solid rgba(255, 255, 255, 0.7);
+    border-radius: 9999px;
+    box-shadow:
+      3px 3px 8px var(--sd-dark-weak),
+      -3px -3px 8px var(--sd-light);
+  }
+
+  /* ---------- Interactive states ---------- */
+
+  .neu-press {
+    transition: box-shadow 160ms ease, transform 160ms ease;
+  }
+  .neu-press:hover {
+    box-shadow:
+      5px 5px 14px var(--sd-dark),
+      -5px -5px 14px var(--sd-light);
+    transform: translateY(-1px);
+  }
+  .neu-press:active {
+    box-shadow: inset 3px 3px 7px var(--sd-dark-weak);
+    transform: translateY(0);
+  }
+
+  /* Active nav item: flat tinted pill, matching the reference mockup,
+     with only a whisper of shadow so it still feels "soft". */
+  .neu-nav-active {
+    background: #eaf1ff;
+    box-shadow: inset 1px 1px 3px rgba(37, 99, 235, 0.12);
+  }
+
+  /* ---------- Coloured raised buttons ---------- */
+
+  .neu-btn-blue {
+    background: linear-gradient(145deg, #3b7bf5, #2563eb);
+    color: #fff;
+    box-shadow: 4px 4px 12px rgba(37, 99, 235, 0.32);
+  }
+  .neu-btn-blue:active {
+    box-shadow: inset 3px 3px 7px rgba(20, 60, 160, 0.45);
+  }
+
+  .neu-btn-red {
+    background: linear-gradient(145deg, #f8574f, #e0342c);
+    color: #fff;
+    box-shadow: 4px 4px 14px rgba(239, 68, 68, 0.35);
+  }
+  .neu-btn-red:active {
+    box-shadow: inset 3px 3px 7px rgba(150, 25, 25, 0.45);
+  }
+
+  .neu-btn-green {
+    background: linear-gradient(145deg, #1ccb8b, #0ea968);
+    color: #fff;
+    box-shadow: 4px 4px 14px rgba(16, 185, 129, 0.35);
+  }
+  .neu-btn-green:active {
+    box-shadow: inset 3px 3px 7px rgba(5, 100, 65, 0.45);
+  }
+
+  /* ---------- Tinted icon wells ---------- */
+  /* Flat tint, like the reference mockup, plus a faint lift so it
+     doesn't sit perfectly flush with the card. */
+
+  .neu-icon-blue {
+    background: #e4edfd;
+    box-shadow: 2px 2px 6px rgba(37, 99, 235, 0.12);
+  }
+  .neu-icon-red {
+    background: #fde3e1;
+    box-shadow: 2px 2px 6px rgba(239, 68, 68, 0.14);
+  }
+  .neu-icon-amber {
+    background: #fdf0d4;
+    box-shadow: 2px 2px 6px rgba(245, 181, 40, 0.16);
+  }
+  .neu-icon-slate {
+    background: #eef1f7;
+    box-shadow: 2px 2px 6px var(--sd-dark-weak);
+  }
+  .neu-icon-green {
+    background: #dcf6ea;
+    box-shadow: 2px 2px 6px rgba(16, 185, 129, 0.14);
+  }
+
+  /* ---------- Brand mark ---------- */
+
+  /* src/index.css, inside @layer components */
+
+.orbit-brandmark {
+  width: 240px;
+  height: 240px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+/* Blue — top-left cell, curve faces center (bottom-right of the cell) */
+.orbit-brandmark span:nth-child(1) {
+  background: var(--orbit-blue);
+  border-bottom-right-radius: 100%;
+}
+
+/* Red — top-right cell, curve faces center (bottom-left of the cell) */
+.orbit-brandmark span:nth-child(2) {
+  background: var(--orbit-red);
+  border-bottom-left-radius: 100%;
+}
+
+/* Navy — bottom-left cell, curve faces center (top-right of the cell) */
+.orbit-brandmark span:nth-child(3) {
+  background: #0f172a;
+  border-top-right-radius: 100%;
+}
+
+/* Amber — bottom-right cell, curve faces center (top-left of the cell) */
+.orbit-brandmark span:nth-child(4) {
+  background: var(--orbit-amber);
+  border-top-left-radius: 100%;
+}
+}
+
+@layer utilities {
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border-radius: 999px;
+    background: #e4e9f2;
+    box-shadow: inset 1px 1px 3px var(--sd-dark-weak);
+    outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background: #2563eb;
+    box-shadow: 1px 1px 4px rgba(37, 99, 235, 0.5);
+    border: 2px solid #fff;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 15px;
+    height: 15px;
+    border: 2px solid #fff;
+    border-radius: 50%;
+    background: #2563eb;
+  }
+
+  audio {
+    border-radius: 12px;
+    background: #f1f4fa;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #ccd3e0;
+    border-radius: 999px;
+    border: 3px solid var(--page-bg);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #aab4c8;
+  }
+
+  select {
+    background-image: none;
+    appearance: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -21,12 +21,26 @@ env/
 venv/
 ENV/
 
+# Android build artifacts & local properties
+.gradle/
+**/.gradle/
+**/build/
+local.properties
+**/local.properties
+.idea/
+**/.idea/
+*.iml
+.navigation/
+captures/
+
 # Logs
 *.log
 **/stdout.log
 **/stderr.log
 **/server_out.log
 **/server_err.log
+backend/logs/
+**/logs/
 
 # Environment & local settings
 .env
@@ -37,7 +51,6 @@ ENV/
 .DS_Store
 Thumbs.db
 .vscode/
-.idea/
 *.suo
 *.ntvs*
 *.njsproj

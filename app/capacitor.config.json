@@ -1,0 +1,9 @@
+{
+  "appId": "com.sanin.beyond404",
+  "appName": "Beyond404",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true,
+    "androidScheme": "https"
+  }
+}

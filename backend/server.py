@@ -7,6 +7,7 @@ sys.path.insert(0, str(BASE_DIR))
 import asyncio
 import json
 import random
+import time
 import uuid
 from datetime import datetime
 from collections import deque
@@ -17,23 +18,39 @@ from aiohttp import web, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription
 import onnxruntime as ort
 
+from logger import setup_logging, get_logger, log_audit_event, APP_LOG_FILE, AUDIT_LOG_FILE
 from forensics import ZERO_HASH, generate_block, export_certificate, save_certificate
 from generate_pdf import generate_pdf
 import database
 import io
 import base64
 from forensic_visualizer import compute_forensic_indicators, generate_mel_forensic_plot
+from local_model import local_model
+
+# Initialize central logging
+setup_logging()
+logger = get_logger("Gateway")
+webrtc_log = get_logger("WebRTC")
+forensic_log = get_logger("Forensics")
+ws_log = get_logger("Signaling")
+http_log = get_logger("HTTP")
 
 HOST = "0.0.0.0"
 PORT = 8080
-MODEL_PATH = "model.onnx"
+MODEL_PATH = str(BASE_DIR / "model.onnx")
+LOCAL_MODEL_DIR = str(BASE_DIR / "local_model")
 
+# Keep original ONNX model preserved in the codebase
 try:
+    logger.info("Verifying original ONNX model presence at %s...", MODEL_PATH)
     session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
-    print(f"[INFO] Loaded {MODEL_PATH} successfully.")
+    logger.info("Preserved original ONNX model verified at %s.", MODEL_PATH)
 except Exception as e:
-    print(f"[WARNING] Could not load {MODEL_PATH}: {e}")
+    logger.warning("Could not initialize ONNX session for %s: %s", MODEL_PATH, e)
     session = None
+
+# Active Inference Engine: Pretrained Wav2Vec2 named as 'local_model'
+logger.info("Active inference engine: 'local_model' (Pretrained Wav2Vec2) from %s", LOCAL_MODEL_DIR)
 
 TARGET_SAMPLES = 48000
 
@@ -104,11 +121,12 @@ def extract_mel_spectrogram(audio_np):
     norm_mel = (log_mel - np.mean(log_mel)) / (np.std(log_mel) + 1e-6)
     return np.expand_dims(norm_mel, axis=(0, 1)).astype(np.float32)
 
-def run_inference(input_tensor):
-    if session is None:
-        return random.uniform(0.1, 0.8)
-    outputs = session.run(None, {"mel_spectrogram": input_tensor})
-    return float(outputs[1][0, 1])
+def run_inference(audio_or_tensor):
+    """
+    Primary inference call: evaluates synthetic score using local_model (Pretrained Wav2Vec2).
+    Compatible with raw audio numpy waveforms as well as tensor inputs.
+    """
+    return local_model.run_inference(audio_or_tensor)
 
 def calibrate_score(raw_score, telemetry):
     score = raw_score * 0.85 if (telemetry["plc_active"] or telemetry["loss_rate"] > 10.0) else raw_score
@@ -125,8 +143,26 @@ async def broadcast_telemetry(payload):
         except Exception:
             ws_clients.discard(ws)
 
-async def send_to_user(user_id: int, payload: dict):
-    sockets = user_sockets.get(user_id, set())
+def get_user_sockets(user_id):
+    if user_id is None:
+        return set()
+    keys = {user_id, str(user_id)}
+    try:
+        keys.add(int(user_id))
+    except (ValueError, TypeError):
+        pass
+    alive = set()
+    for k in keys:
+        if k in user_sockets:
+            for ws in list(user_sockets[k]):
+                if not ws.closed:
+                    alive.add(ws)
+                else:
+                    user_sockets[k].discard(ws)
+    return alive
+
+async def send_to_user(user_id, payload: dict):
+    sockets = get_user_sockets(user_id)
     if not sockets:
         return False
     msg = json.dumps(payload)
@@ -137,14 +173,13 @@ async def send_to_user(user_id: int, payload: dict):
             alive.add(ws)
         except Exception:
             pass
-    user_sockets[user_id] = alive
     return len(alive) > 0
 
 async def call_timeout_worker(call_id: str, caller: dict, callee: dict):
     try:
         await asyncio.sleep(25)
         if call_id in active_calls and active_calls[call_id]["status"] == "ringing":
-            print(f"[CALL] Call {call_id} timed out without answer. Auto-cutting call.")
+            ws_log.warning("Call %s timed out after 25s without answer. Auto-cutting call.", call_id)
             active_calls[call_id]["status"] = "missed"
             payload = {
                 "type": "call_timeout",
@@ -171,7 +206,7 @@ async def call_timeout_worker(call_id: str, caller: dict, callee: dict):
                     flagged=False
                 )
             except Exception as dbe:
-                print(f"[DB ERROR] Missed call log failed: {dbe}")
+                logger.error("Missed call DB logging failed: %s", dbe)
     except asyncio.CancelledError:
         pass
 
@@ -180,21 +215,21 @@ async def close_pc_session(pc_id: str):
         task = active_pc_tasks.pop(pc_id)
         if not task.done():
             task.cancel()
-            print(f"[WEBRTC] Cancelled audio track processor task for session {pc_id}")
+            webrtc_log.info("Cancelled audio processor task for session %s", pc_id)
 
     if pc_id in active_pcs:
         pc = active_pcs.pop(pc_id)
         try:
             await pc.close()
-            print(f"[WEBRTC] Closed RTCPeerConnection for session {pc_id}")
+            webrtc_log.info("Closed RTCPeerConnection for session %s", pc_id)
         except Exception as e:
-            print(f"[WEBRTC WARNING] Error closing PC {pc_id}: {e}")
+            webrtc_log.warning("Error closing PC %s: %s", pc_id, e)
 
     simulation_settings.pop(pc_id, None)
 
 async def process_audio_track(track, pc_id: str):
     global latest_certificate
-    print(f"[WEBRTC] Audio stream processing started for session {pc_id}!")
+    webrtc_log.info("Audio stream ingestion started for session %s (16kHz Opus mono)", pc_id)
     forensic_chain = []
     previous_hash = ZERO_HASH
     frame_counter = 0
@@ -203,7 +238,7 @@ async def process_audio_track(track, pc_id: str):
     try:
         while True:
             if pc_id not in active_pcs:
-                print(f"[WEBRTC] Session {pc_id} has ended. Stopping audio frame consumption.")
+                webrtc_log.info("Session %s has ended. Halting frame consumption.", pc_id)
                 break
 
             try:
@@ -213,7 +248,7 @@ async def process_audio_track(track, pc_id: str):
                     break
                 continue
             except Exception as recv_err:
-                print(f"[WEBRTC] Track ended or closed for {pc_id}: {recv_err}")
+                webrtc_log.info("Audio track closed for session %s: %s", pc_id, recv_err)
                 break
 
             pcm_bytes = frame.to_ndarray().tobytes()
@@ -229,8 +264,10 @@ async def process_audio_track(track, pc_id: str):
 
             if len(audio_buf) >= 16000:
                 current_audio = np.array(audio_buf, dtype=np.float32)
-                input_tensor = extract_mel_spectrogram(current_audio)
-                raw_score = run_inference(input_tensor)
+
+                # Primary inference using local_model (Pretrained Wav2Vec2)
+                pred_result = local_model.predict(current_audio, sr=16000)
+                raw_score = pred_result["score"]
                 score, tier = calibrate_score(raw_score, telemetry)
 
                 previous_hash, entry = generate_block(
@@ -247,6 +284,9 @@ async def process_audio_track(track, pc_id: str):
 
                 # Calculate real-time Mel spectrogram reasons & forensic indicators
                 analysis = compute_forensic_indicators(current_audio, sr=16000, model_score=score)
+                if "classification" in pred_result:
+                    analysis["classification"] = pred_result["classification"]
+                    analysis["confidence"] = pred_result["confidence"]
 
                 telemetry_payload = {
                     "type": "telemetry",
@@ -264,29 +304,69 @@ async def process_audio_track(track, pc_id: str):
                     "jitter": telemetry["jitter"],
                     "noise_level": telemetry["noise_level"],
                     "plc_active": telemetry["plc_active"],
-                    "current_hash": previous_hash
+                    "current_hash": previous_hash,
+                    "model_engine": "local_model (Wav2Vec2 Pretrained)"
                 }
                 asyncio.create_task(broadcast_telemetry(telemetry_payload))
-                print(f"[RESULT #{frame_counter} | {pc_id[:8]}] Score: {score:.2f} | Risk: {tier} | Loss: {telemetry['loss_rate']}% | Jitter: {telemetry['jitter']}ms")
+
+                forensic_log.info(
+                    "Block #%04d | Sess: %s | Score: %5.1f%% (%s) | Vocoder: %4.1f%% | Silence: %4.1f%% | Hash: %s... | Engine: local_model",
+                    frame_counter,
+                    pc_id[:8],
+                    analysis["overall_risk_score"],
+                    analysis["risk_level"],
+                    analysis["indicators"].get("Vocoder", 0),
+                    analysis["indicators"].get("Dead Silence", 0),
+                    previous_hash[:12]
+                )
 
     except asyncio.CancelledError:
-        print(f"[WEBRTC] Audio track loop explicitly cancelled for {pc_id}.")
+        webrtc_log.info("Audio track loop cancelled for %s.", pc_id)
     except Exception as e:
-        print(f"[WEBRTC] Stream loop finished for {pc_id}: {e}")
+        webrtc_log.error("Stream loop exception for %s: %s", pc_id, e)
     finally:
-        print(f"[WEBRTC] Audio processing completely terminated for session {pc_id}.")
+        webrtc_log.info("Audio processing finalized for session %s (Total blocks: %d)", pc_id, len(forensic_chain))
         if forensic_chain:
             latest_certificate = export_certificate(forensic_chain)
             json_path = save_certificate(latest_certificate, filename="forensic_certificate.json")
             try:
                 generate_pdf(certificate_file="forensic_certificate.json", output_file="forensic_certificate.pdf")
+                forensic_log.info("Generated PDF forensic certificate: forensic_certificate.pdf")
             except Exception as pe:
-                print(f"[PDF] Could not generate PDF certificate: {pe}")
-            print(f"[FORENSIC] Session certificate saved: {json_path}")
+                forensic_log.error("Could not generate PDF certificate: %s", pe)
+            forensic_log.info("Forensic session certificate saved: %s", json_path)
+            log_audit_event("FORENSIC_CERTIFICATE_SAVED", {
+                "sessionId": pc_id,
+                "blocks_count": len(forensic_chain),
+                "terminal_hash": previous_hash,
+                "certificate_path": str(json_path)
+            })
 
 # -----------------------------------------------------------------------------
-# CORS Middleware
+# HTTP Middlewares (CORS + Request Logging)
 # -----------------------------------------------------------------------------
+@web.middleware
+async def request_logging_middleware(request, handler):
+    start_time = time.time()
+    client_ip = request.remote or "unknown"
+    path = request.path_qs
+
+    try:
+        response = await handler(request)
+        duration_ms = (time.time() - start_time) * 1000
+        # Don't log spammy ws pings
+        if not path.startswith("/ws"):
+            http_log.info("%s %s -> %d (%.1fms, %s)", request.method, path, response.status, duration_ms, client_ip)
+        return response
+    except web.HTTPException as ex:
+        duration_ms = (time.time() - start_time) * 1000
+        http_log.warning("%s %s -> %d (%.1fms, %s)", request.method, path, ex.status, duration_ms, client_ip)
+        raise
+    except Exception as ex:
+        duration_ms = (time.time() - start_time) * 1000
+        http_log.error("Unhandled error on %s %s (%.1fms, %s): %s", request.method, path, duration_ms, client_ip, ex)
+        return web.json_response({"success": False, "error": str(ex)}, status=500)
+
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
@@ -307,16 +387,21 @@ async def cors_middleware(request, handler):
 # HTTP & WebSocket Handlers
 # -----------------------------------------------------------------------------
 async def websocket_handler(request):
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(heartbeat=15.0)
     await ws.prepare(request)
     ws_clients.add(ws)
 
     user_id_param = request.query.get("userId")
-    if user_id_param and user_id_param.isdigit():
-        uid = int(user_id_param)
+    uid = None
+    if user_id_param:
+        try:
+            uid = int(user_id_param)
+        except (ValueError, TypeError):
+            uid = str(user_id_param)
         user_sockets.setdefault(uid, set()).add(ws)
+        user_sockets.setdefault(str(uid), set()).add(ws)
         socket_to_user[ws] = uid
-        print(f"[WEBSOCKET] Registered user #{uid} on socket connection.")
+        ws_log.info("WebSocket connected and bound to User #%s (active sockets: %d)", uid, len(get_user_sockets(uid)))
 
     try:
         async for msg in ws:
@@ -328,13 +413,23 @@ async def websocket_handler(request):
 
                 msg_type = data.get("type")
 
+                # JSON heartbeat ping
+                if msg_type == "ping":
+                    await ws.send_str(json.dumps({"type": "pong", "timestamp": time.time()}))
+                    continue
+
                 # User registration
-                if msg_type == "register":
-                    uid = data.get("userId")
-                    if uid:
-                        uid = int(uid)
+                elif msg_type == "register":
+                    uid_val = data.get("userId") or uid
+                    if uid_val is not None:
+                        try:
+                            uid = int(uid_val)
+                        except (ValueError, TypeError):
+                            uid = str(uid_val)
                         user_sockets.setdefault(uid, set()).add(ws)
+                        user_sockets.setdefault(str(uid), set()).add(ws)
                         socket_to_user[ws] = uid
+                        ws_log.info("Registered User #%s (%s) on active socket. Active user sockets: %d", uid, data.get("userName", "Analyst"), len(get_user_sockets(uid)))
                         await ws.send_str(json.dumps({"type": "registered", "userId": uid}))
 
                 # Dynamic Simulation Parameter Adjustment
@@ -350,7 +445,10 @@ async def websocket_handler(request):
                             curr["noise_level"] = float(data["noise_level"]) / 100.0
                         if "codec" in data:
                             curr["codec"] = str(data["codec"])
-                        print(f"[SIMULATION UPDATE] Session {pc_id[:8]} => Loss: {curr['packet_loss']*100}%, Jitter: {curr['jitter_ms']}ms, Noise: {curr.get('noise_level',0)*100}%")
+                        webrtc_log.info(
+                            "Simulation updated for session %s => Loss: %.1f%%, Jitter: %dms, Noise: %.1f%%",
+                            pc_id[:8], curr["packet_loss"] * 100, curr["jitter_ms"], curr.get("noise_level", 0) * 100
+                        )
 
                 # Call initiation
                 elif msg_type == "call_request":
@@ -359,9 +457,12 @@ async def websocket_handler(request):
                     callee = data.get("callee", {})
                     callee_id = callee.get("id")
 
-                    print(f"[CALL] {caller.get('name')} is calling {callee.get('name')} (ID #{callee_id})")
-                    callee_sockets = user_sockets.get(callee_id, set())
+                    ws_log.info("Call signaling initiated: %s (ID #%s) -> %s (ID #%s) [Call ID: %s]",
+                                caller.get("name"), caller.get("id"), callee.get("name"), callee_id, call_id)
+                    callee_sockets = get_user_sockets(callee_id)
                     is_online = len(callee_sockets) > 0
+                    ws_log.info("Call signaling initiated: %s (ID #%s) -> %s (ID #%s) [Call ID: %s] | Callee active sockets: %d",
+                                caller.get("name"), caller.get("id"), callee.get("name"), callee_id, call_id, len(callee_sockets))
 
                     timeout_task = asyncio.create_task(call_timeout_worker(call_id, caller, callee))
                     active_calls[call_id] = {
@@ -374,18 +475,21 @@ async def websocket_handler(request):
                     }
 
                     if not is_online:
+                        ws_log.info("Callee #%s is offline. Sending callee_offline event to caller #%s", callee_id, caller.get("id"))
                         await ws.send_str(json.dumps({
                             "type": "callee_offline",
                             "call_id": call_id,
                             "callee": callee,
-                            "message": f"{callee.get('name')} is not currently active on another device."
+                            "message": f"{callee.get('name', 'User')} is not currently active on another device."
                         }))
                     else:
-                        await send_to_user(callee_id, {
+                        ws_log.info("Ringing Callee #%s (%d active sockets) for Call %s...", callee_id, len(callee_sockets), call_id)
+                        sent = await send_to_user(callee_id, {
                             "type": "incoming_call",
                             "call_id": call_id,
                             "caller": caller
                         })
+                        ws_log.info("Dispatched incoming_call to Callee #%s (success=%s)", callee_id, sent)
                         await ws.send_str(json.dumps({
                             "type": "call_ringing",
                             "call_id": call_id,
@@ -402,12 +506,38 @@ async def websocket_handler(request):
                             cinfo["timeout_task"].cancel()
 
                         caller_id = cinfo["caller"].get("id")
-                        print(f"[CALL] Call {call_id} accepted by callee.")
+                        ws_log.info("Call %s accepted by Callee. Notifying caller #%s.", call_id, caller_id)
                         if caller_id:
                             await send_to_user(caller_id, {
                                 "type": "call_accepted",
                                 "call_id": call_id
                             })
+
+                # WebRTC P2P signaling relay for direct 2-way audio (offer / answer / ice candidate)
+                elif msg_type == "webrtc_signal":
+                    call_id = data.get("call_id")
+                    signal = data.get("signal")
+                    target_id = data.get("target_user_id")
+
+                    if not target_id and call_id in active_calls:
+                        cinfo = active_calls[call_id]
+                        c_caller_id = cinfo.get("caller", {}).get("id")
+                        c_callee_id = cinfo.get("callee", {}).get("id")
+                        if str(uid) == str(c_caller_id):
+                            target_id = c_callee_id
+                        else:
+                            target_id = c_caller_id
+
+                    if target_id and signal:
+                        sig_type = signal.get("type", "candidate")
+                        ws_log.info("Relaying WebRTC P2P audio signal (%s) User #%s -> User #%s for Call %s",
+                                    sig_type, uid, target_id, call_id)
+                        await send_to_user(target_id, {
+                            "type": "webrtc_signal",
+                            "call_id": call_id,
+                            "from_user_id": uid,
+                            "signal": signal
+                        })
 
                 # Callee declines call
                 elif msg_type == "call_decline":
@@ -421,7 +551,7 @@ async def websocket_handler(request):
                         caller = cinfo["caller"]
                         callee = cinfo["callee"]
                         caller_id = caller.get("id")
-                        print(f"[CALL] Call {call_id} declined by callee.")
+                        ws_log.info("Call %s declined by Callee. Notifying caller #%s.", call_id, caller_id)
                         if caller_id:
                             await send_to_user(caller_id, {
                                 "type": "call_declined",
@@ -443,14 +573,16 @@ async def websocket_handler(request):
                                 flagged=False
                             )
                         except Exception as dbe:
-                            print(f"[DB ERROR] Declined call log failed: {dbe}")
+                            logger.error("Declined call DB logging failed: %s", dbe)
 
                 # Either party ends call
                 elif msg_type == "call_end":
                     call_id = data.get("call_id")
+                    target_id = data.get("target_user_id")
                     duration = int(data.get("duration", 0))
                     score = int(data.get("score", 20))
                     risk_tier = data.get("risk_tier", "Low Risk")
+                    ws_log.info("Call end requested by User #%s for Call %s (target=%s)", uid, call_id, target_id)
 
                     if call_id in active_calls:
                         cinfo = active_calls[call_id]
@@ -482,9 +614,12 @@ async def websocket_handler(request):
                                 risk_tier=risk_tier,
                                 flagged=flagged
                             )
-                            print(f"[CALL] Saved call {call_id} to Supabase: duration={duration}s, score={score}%, flagged={flagged}")
+                            ws_log.info(
+                                "Call %s completed: %s -> %s (Duration: %ds, Score: %d%%, Flagged: %s)",
+                                call_id, caller.get("name"), callee.get("name"), duration, score, flagged
+                            )
                         except Exception as dbe:
-                            print(f"[DB ERROR] Completed call log failed: {dbe}")
+                            logger.error("Completed call DB logging failed: %s", dbe)
 
                         del active_calls[call_id]
 
@@ -493,11 +628,13 @@ async def websocket_handler(request):
     finally:
         ws_clients.discard(ws)
         uid = socket_to_user.pop(ws, None)
-        if uid and uid in user_sockets:
-            user_sockets[uid].discard(ws)
-            if not user_sockets[uid]:
-                del user_sockets[uid]
-        print(f"[WEBSOCKET] Client disconnected (User #{uid}).")
+        if uid is not None:
+            for k in [uid, str(uid)]:
+                if k in user_sockets:
+                    user_sockets[k].discard(ws)
+                    if not user_sockets[k]:
+                        user_sockets.pop(k, None)
+        ws_log.info("WebSocket disconnected for User #%s (has other active sockets: %s)", uid, bool(get_user_sockets(uid)))
     return ws
 
 async def export_certificate_handler(request):
@@ -513,6 +650,7 @@ async def export_certificate_handler(request):
     if not data:
         return web.json_response({"error": "No session certificate available yet."}, status=404)
 
+    forensic_log.info("Exporting JSON forensic certificate to client.")
     return web.json_response(
         data,
         headers={
@@ -533,6 +671,7 @@ async def export_pdf_handler(request):
             save_certificate(latest_certificate, filename="forensic_certificate.json")
         generate_pdf(certificate_file="forensic_certificate.json", output_file="forensic_certificate.pdf")
         if pdf_path.exists():
+            forensic_log.info("Serving PDF forensic certificate to client.")
             return web.FileResponse(
                 pdf_path,
                 headers={
@@ -541,6 +680,7 @@ async def export_pdf_handler(request):
                 }
             )
     except Exception as e:
+        forensic_log.error("Failed to generate PDF: %s", e)
         return web.json_response({"error": f"Failed to generate PDF: {e}"}, status=500)
 
     return web.json_response({"error": "PDF file not found."}, status=404)
@@ -561,15 +701,19 @@ async def offer(request):
     pc = RTCPeerConnection()
     active_pcs[pc_id] = pc
 
+    webrtc_log.info("Received WebRTC Offer for session %s (Loss: %.1f%%, Jitter: %dms)",
+                    pc_id, initial_sim["packet_loss"]*100, initial_sim["jitter_ms"])
+
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
+            webrtc_log.info("Binding inbound audio track to analysis engine for session %s", pc_id)
             task = asyncio.create_task(process_audio_track(track, pc_id))
             active_pc_tasks[pc_id] = task
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        print(f"[WEBRTC] PC {pc_id} connection state changed to: {pc.connectionState}")
+        webrtc_log.info("WebRTC session %s state changed -> %s", pc_id, pc.connectionState)
         if pc.connectionState in ["closed", "failed", "disconnected"]:
             await close_pc_session(pc_id)
 
@@ -577,6 +721,7 @@ async def offer(request):
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
+    webrtc_log.info("Created WebRTC Answer for session %s. Signaling handshake ready.", pc_id)
     return web.Response(
         content_type="application/json",
         text=json.dumps({
@@ -595,9 +740,11 @@ async def hangup_handler(request):
 
     pc_id = data.get("sessionId")
     if pc_id:
+        webrtc_log.info("Explicit hangup requested for session %s", pc_id)
         await close_pc_session(pc_id)
         return web.json_response({"success": True, "message": f"Session {pc_id} terminated."})
     
+    webrtc_log.info("Hangup requested for all active sessions (%d active).", len(active_pcs))
     for pid in list(active_pcs.keys()):
         await close_pc_session(pid)
 
@@ -621,6 +768,8 @@ async def simulation_handler(request):
         if "codec" in data:
             curr["codec"] = str(data["codec"])
 
+        webrtc_log.info("Updated network simulation via REST for %s: Loss=%.1f%%, Jitter=%dms",
+                        pc_id, curr["packet_loss"]*100, curr["jitter_ms"])
         return web.json_response({
             "success": True,
             "sessionId": pc_id,
@@ -734,6 +883,49 @@ async def post_activity_handler(request):
     except Exception as e:
         return web.json_response({"success": False, "error": f"Failed to record activity: {e}"}, status=500)
 
+def decode_uploaded_audio(audio_bytes: bytes, target_sr: int = 16000) -> np.ndarray:
+    """
+    Decodes audio bytes from any supported audio format (WAV, MP3, M4A, AAC, OGG, WebM, FLAC, raw PCM)
+    into a 1D float32 numpy array resampled to target_sr mono.
+    Tries PyAV first (with bundled ffmpeg libraries), then librosa/soundfile, then raw PCM.
+    """
+    if not audio_bytes:
+        return np.array([], dtype=np.float32)
+
+    # 1. Try PyAV (handles mp3, wav, m4a, aac, ogg, webm, flac, etc.)
+    try:
+        import av
+        with av.open(io.BytesIO(audio_bytes)) as container:
+            stream = next((s for s in container.streams if s.type == "audio"), None)
+            if stream is not None:
+                resampler = av.AudioResampler(format="fltp", layout="mono", rate=target_sr)
+                chunks = []
+                for frame in container.decode(stream):
+                    for resampled_frame in resampler.resample(frame):
+                        chunks.append(resampled_frame.to_ndarray())
+                if chunks:
+                    return np.concatenate(chunks, axis=1).squeeze().astype(np.float32)
+    except Exception as av_err:
+        forensic_log.debug("PyAV audio decode fallback: %s", av_err)
+
+    # 2. Try librosa / soundfile
+    try:
+        with io.BytesIO(audio_bytes) as bio:
+            audio_np, _ = librosa.load(bio, sr=target_sr, mono=True)
+            if len(audio_np) > 0:
+                return audio_np.astype(np.float32)
+    except Exception as sf_err:
+        forensic_log.debug("librosa/soundfile decode fallback: %s", sf_err)
+
+    # 3. Try raw 16-bit PCM fallback
+    try:
+        raw_pcm = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        if len(raw_pcm) > 0:
+            return raw_pcm
+    except Exception:
+        pass
+
+    return np.array([], dtype=np.float32)
 
 async def analyze_audio_handler(request):
     """
@@ -741,6 +933,7 @@ async def analyze_audio_handler(request):
     Accepts multipart/form-data audio file or raw audio.
     Computes standardized waveform, log-mel spectrogram, 4-tier forensic indicator breakdown,
     and returns both the structured metrics and the high-res base64 visualization plot.
+    Utilizes local_model (Pretrained Wav2Vec2) as the active inference engine.
     """
     try:
         audio_bytes = None
@@ -754,7 +947,13 @@ async def analyze_audio_handler(request):
                     break
                 if part.name == "file":
                     filename = part.filename or "uploaded_audio.wav"
-                    audio_bytes = await part.read(decode=False)
+                    chunks = []
+                    while True:
+                        chunk = await part.read_chunk(1024 * 1024)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    audio_bytes = b"".join(chunks)
                     break
         else:
             try:
@@ -768,19 +967,25 @@ async def analyze_audio_handler(request):
         if not audio_bytes or len(audio_bytes) == 0:
             return web.json_response({"success": False, "error": "No audio file provided."}, status=400)
 
-        # Load audio into numpy array (16kHz mono)
-        with io.BytesIO(audio_bytes) as bio:
-            audio_np, sr = librosa.load(bio, sr=16000, mono=True)
+        forensic_log.info("Audio analysis initiated for file '%s' (%d bytes)", filename, len(audio_bytes))
+
+        # Robust multi-format audio decoding to 16kHz mono float32
+        audio_np = decode_uploaded_audio(audio_bytes, target_sr=16000)
 
         if len(audio_np) == 0:
-            return web.json_response({"success": False, "error": "Audio file is empty or unreadable."}, status=400)
+            return web.json_response({"success": False, "error": "Audio file is empty or unsupported format."}, status=400)
 
-        # ONNX inference
-        input_tensor = extract_mel_spectrogram(audio_np)
-        raw_score = run_inference(input_tensor)
+        # Pretrained Wav2Vec2 inference via local_model
+        infer_t0 = time.time()
+        pred_result = local_model.predict(audio_np, sr=16000)
+        raw_score = pred_result["score"]
+        infer_dt = (time.time() - infer_t0) * 1000
 
         # Calculate indicators in exact requested format
         analysis = compute_forensic_indicators(audio_np, sr=16000, model_score=raw_score)
+        if "classification" in pred_result:
+            analysis["classification"] = pred_result["classification"]
+            analysis["confidence"] = pred_result["confidence"]
 
         # Generate exact 3-panel figure
         plot_b64 = generate_mel_forensic_plot(
@@ -790,6 +995,19 @@ async def analyze_audio_handler(request):
             indicators=analysis["indicators"],
             key_flags=analysis["key_flags"]
         )
+
+        forensic_log.info(
+            "Audio analysis complete for '%s' (%.2fs duration, local_model [Wav2Vec2]: %.1fms) => Score: %.1f/100, Tier: %s, Class: %s",
+            filename, float(len(audio_np)/16000.0), infer_dt, analysis["overall_risk_score"], analysis["risk_level"], analysis["classification"]
+        )
+        log_audit_event("AUDIO_FILE_ANALYZED", {
+            "filename": filename,
+            "duration_sec": round(float(len(audio_np) / 16000.0), 2),
+            "score": analysis["overall_risk_score"],
+            "risk_level": analysis["risk_level"],
+            "classification": analysis["classification"],
+            "inference_engine": "local_model (Wav2Vec2 Pretrained)"
+        })
 
         return web.json_response({
             "success": True,
@@ -802,34 +1020,96 @@ async def analyze_audio_handler(request):
             "confidence": analysis["confidence"],
             "indicators": analysis["indicators"],
             "key_flags": analysis["key_flags"],
+            "model_engine": "local_model (Wav2Vec2 Pretrained)",
             "plot_image": f"data:image/png;base64,{plot_b64}"
         })
     except Exception as e:
-        print(f"[ANALYZE ERROR] {e}")
+        forensic_log.error("Audio analysis failed: %s", e)
         return web.json_response({"success": False, "error": f"Audio analysis failed: {str(e)}"}, status=500)
+
+# -----------------------------------------------------------------------------
+# System Status & Logs API
+# -----------------------------------------------------------------------------
+
+async def download_apk_handler(request):
+    apk_candidates = [
+        Path(r"E:\copy-backend-tunneling\beyond404.apk"),
+        Path(r"E:\copy-backend-tunneling\app\android\app\build\outputs\apk\debug\app-debug.apk"),
+    ]
+    for apk in apk_candidates:
+        if apk.exists():
+            return web.FileResponse(apk, headers={
+                "Content-Disposition": "attachment; filename=\"beyond404.apk\""
+            })
+    return web.Response(text="APK not found on server.", status=404)
+
+async def get_online_users_handler(request):
+    online_ids = set()
+    for k, sockets in user_sockets.items():
+        if any(not s.closed for s in sockets):
+            try:
+                online_ids.add(int(k))
+            except (ValueError, TypeError):
+                online_ids.add(str(k))
+    return web.json_response({"success": True, "online_user_ids": list(online_ids)})
 
 async def me_handler(request):
     return web.json_response({
         "status": "online",
         "service": "Beyond404 Voice Forensics Gateway",
+        "inference_engine": "local_model (Wav2Vec2 Pretrained)",
         "active_sessions": len(active_pcs),
         "timestamp": datetime.now().isoformat()
     })
 
+async def get_logs_handler(request):
+    """
+    GET /api/logs:
+    Returns the latest N lines of server application logs.
+    Query params: lines=100 (default 100, max 1000)
+    """
+    lines_count = int(request.query.get("lines", 100))
+    lines_count = max(1, min(lines_count, 1000))
+    target = request.query.get("type", "app")  # 'app' or 'audit'
+
+    log_path = AUDIT_LOG_FILE if target == "audit" else APP_LOG_FILE
+
+    if not log_path.exists():
+        return web.json_response({"success": True, "logs": [], "total_lines": 0})
+
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines_count:]
+        return web.json_response({
+            "success": True,
+            "type": target,
+            "total_lines": len(all_lines),
+            "returned_lines": len(tail),
+            "logs": [l.rstrip("\r\n") for l in tail]
+        })
+    except Exception as e:
+        return web.json_response({"success": False, "error": f"Failed reading logs: {e}"}, status=500)
+
 async def on_startup(app):
+    logger.info("Initializing Beyond404 Gateway services...")
     try:
         await database.init_db()
-        print("[DATABASE] Supabase PostgreSQL connected and user/activity store verified.")
+        logger.info("Database connection and schema tables verified.")
     except Exception as e:
-        print(f"[DATABASE WARNING] Could not connect to Supabase: {e}")
+        logger.error("Could not connect to Supabase: %s", e)
 
 async def on_shutdown(app):
-    print("[SERVER] Shutting down WebRTC sessions...")
+    logger.info("Gateway shutdown initiated. Closing all active WebRTC sessions...")
     for pid in list(active_pcs.keys()):
         await close_pc_session(pid)
+    logger.info("All WebRTC sessions gracefully terminated. Gateway offline.")
 
 def create_app():
-    app = web.Application(middlewares=[cors_middleware])
+    app = web.Application(
+        client_max_size=100 * 1024 * 1024,
+        middlewares=[cors_middleware, request_logging_middleware]
+    )
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
@@ -837,7 +1117,11 @@ def create_app():
     app.router.add_post("/api/register", register_handler)
     app.router.add_post("/api/login", login_handler)
     app.router.add_get("/api/users", get_users_handler)
+    app.router.add_get("/api/online-users", get_online_users_handler)
     app.router.add_get("/api/me", me_handler)
+    app.router.add_get("/download-apk", download_apk_handler)
+    app.router.add_get("/apk", download_apk_handler)
+    app.router.add_get("/api/logs", get_logs_handler)
 
     # Activity & Call logs (Supabase)
     app.router.add_get("/api/activity", get_activity_handler)
@@ -856,7 +1140,5 @@ def create_app():
 
 if __name__ == "__main__":
     app = create_app()
-    print("==================================================")
-    print("  Beyond404 Gateway + Supabase + WebRTC (Port 8080)")
-    print("==================================================")
-    web.run_app(app, host=HOST, port=PORT)
+    logger.info("Starting Beyond404 Gateway HTTP + WebSockets server on %s:%d", HOST, PORT)
+    web.run_app(app, host=HOST, port=PORT, print=None)

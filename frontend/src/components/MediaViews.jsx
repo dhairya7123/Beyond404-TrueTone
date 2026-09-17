@@ -1,11 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
 import {
   UploadCloud, Music, Pause, ArrowLeft, Trash2, Download, FileText,
-<<<<<<< HEAD
-  Info, ShieldCheck, ChevronDown, Phone, PhoneOff, PhoneCall, Users, Clock, List, BarChart3, AlertCircle, AlertTriangle, Eye, CheckCircle2, ShieldAlert
-=======
-  Info, ShieldCheck, ChevronDown, Phone, PhoneOff, PhoneCall, Users, Clock, List, BarChart3, AlertCircle, AlertTriangle, Activity, Waves
->>>>>>> e255b11 (frontend fix 1)
+  Info, ShieldCheck, ChevronDown, Phone, PhoneOff, PhoneCall, Users, Clock, List, BarChart3, AlertCircle, AlertTriangle, Eye, CheckCircle2, ShieldAlert, Activity, Waves
 } from "lucide-react";
 import { RadialBarChart, RadialBar, PolarAngleAxis } from "recharts";
 
@@ -337,13 +333,27 @@ function ForensicAnalysis({ name, score }) {
   );
 }
 
-export function UploadAudio({ onAnalyzed, currentUser }) {
+export function UploadAudio({ onAnalyzed, onAnalyze, currentUser }) {
   const [dragOver, setDragOver] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(null);
   const inputRef = useRef(null);
+
+  // Support both prop naming conventions seamlessly
+  const handleAnalysisComplete = onAnalyzed || onAnalyze;
 
   async function handleFile(file) {
     if (!file) return;
+    setErrorMessage(null);
+
+    // Guard against excessively large uploads (> 100MB)
+    if (file.size > 100 * 1024 * 1024) {
+      const msg = "Selected audio file exceeds 100 MB. Please choose a smaller recording.";
+      setErrorMessage(msg);
+      alert(msg);
+      return;
+    }
+
     const url = URL.createObjectURL(file);
     setAnalyzing(true);
 
@@ -351,12 +361,39 @@ export function UploadAudio({ onAnalyzed, currentUser }) {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await fetch("/api/analyze-audio", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
+      let res;
+      try {
+        res = await fetch("/api/analyze-audio", {
+          method: "POST",
+          body: formData,
+        });
+      } catch (networkErr) {
+        // Fallback directly to localhost:8080 if Vite proxy encountered a connection error
+        try {
+          const directUrl = `${window.location.protocol}//${window.location.hostname}:8080/api/analyze-audio`;
+          res = await fetch(directUrl, {
+            method: "POST",
+            body: formData,
+          });
+        } catch (retryErr) {
+          throw new Error(
+            "Could not connect to the Beyond404 server. Please make sure the backend is running on port 8080."
+          );
+        }
+      }
 
+      if (!res.ok) {
+        let errDesc = "";
+        try {
+          const errData = await res.json();
+          errDesc = errData.error || errData.message;
+        } catch {
+          errDesc = await res.text();
+        }
+        throw new Error(errDesc || `Analysis server returned status ${res.status}`);
+      }
+
+      const data = await res.json();
       setAnalyzing(false);
 
       if (data.success) {
@@ -364,7 +401,7 @@ export function UploadAudio({ onAnalyzed, currentUser }) {
         const flagged = score >= 50;
         const rc = riskColor(score);
 
-        // Record in Supabase
+        // Record in Supabase if logged in
         if (currentUser?.id) {
           fetch("/api/activity", {
             method: "POST",
@@ -385,7 +422,7 @@ export function UploadAudio({ onAnalyzed, currentUser }) {
           }).catch(console.error);
         }
 
-        onAnalyzed({
+        const analysisResult = {
           name: file.name,
           type: (file.type.split("/")[1] || file.name.split(".").pop() || "audio").toUpperCase(),
           size: fmtBytes(file.size),
@@ -406,13 +443,23 @@ export function UploadAudio({ onAnalyzed, currentUser }) {
           indicators: data.indicators,
           key_flags: data.key_flags,
           plot_image: data.plot_image,
-        });
+          model_engine: data.model_engine || "local_model (Wav2Vec2 Pretrained)",
+        };
+
+        if (typeof handleAnalysisComplete === "function") {
+          handleAnalysisComplete(analysisResult);
+        } else {
+          console.warn("UploadAudio: neither onAnalyzed nor onAnalyze callback is configured.", analysisResult);
+        }
       } else {
-        alert(data.error || "Failed to analyze audio file.");
+        const msg = data.error || "Failed to analyze audio file.";
+        setErrorMessage(msg);
+        alert(msg);
       }
     } catch (err) {
-      console.error(err);
+      console.error("Audio upload analysis failure:", err);
       setAnalyzing(false);
+      setErrorMessage(err.message);
       alert("Error uploading audio for analysis: " + err.message);
     }
   }
@@ -421,7 +468,19 @@ export function UploadAudio({ onAnalyzed, currentUser }) {
     <div>
       <div className="text-xs font-semibold tracking-[0.2em] text-slate-400">UPLOAD AUDIO</div>
       <h1 className="text-2xl font-bold text-slate-900 mt-1">Upload Audio</h1>
-      <p className="text-slate-500 mt-1 mb-6">Analyse voice recordings with ONNX log-mel spectrogram inference &amp; forensic indicator breakdown.</p>
+      <p className="text-slate-500 mt-1 mb-6">Analyse voice recordings with local Wav2Vec2 neural model inference &amp; forensic indicator breakdown.</p>
+
+      {errorMessage && (
+        <div className="neu-card mb-6 p-4 flex items-center justify-between gap-3 text-sm text-red-700 bg-red-50/50 border border-red-200 rounded-2xl">
+          <div className="flex items-center gap-2">
+            <AlertCircle size={18} className="text-red-500 shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+          <button onClick={() => setErrorMessage(null)} className="text-slate-400 hover:text-slate-600 text-xs font-semibold">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div
         className={`neu-card p-14 flex flex-col items-center justify-center text-center transition-all ${dragOver ? "neu-inset" : ""}`}
@@ -441,8 +500,8 @@ export function UploadAudio({ onAnalyzed, currentUser }) {
             <div className="neu-icon-blue w-24 h-24 rounded-full flex items-center justify-center mb-6">
               <div className="w-9 h-9 border-[3px] border-blue-200 border-t-blue-600 rounded-full animate-spin" />
             </div>
-            <div className="text-lg font-semibold text-slate-800">Extracting Log-Mel Spectrogram &amp; Spectral Indicators…</div>
-            <p className="text-slate-400 text-sm mt-1">Computing Spectral Flux, Dead Silence, Pitch Anomaly, and Vocoder Signatures via ONNX.</p>
+            <div className="text-lg font-semibold text-slate-800">Processing Audio via Local Wav2Vec2 Model…</div>
+            <p className="text-slate-400 text-sm mt-1">Extracting spectral flux, silence distribution, pitch anomalies, and vocoder signatures.</p>
           </>
         ) : (
           <>
@@ -460,11 +519,15 @@ export function UploadAudio({ onAnalyzed, currentUser }) {
             <input
               ref={inputRef}
               type="file"
-              accept="audio/*"
+              accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac,.webm"
               className="hidden"
-              onChange={(e) => handleFile(e.target.files?.[0])}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleFile(f);
+                e.target.value = "";
+              }}
             />
-            <div className="text-xs text-slate-400 mt-5">Supported formats: MP3, WAV, M4A, OGG</div>
+            <div className="text-xs text-slate-400 mt-5">Supported formats: MP3, WAV, M4A, AAC, OGG, FLAC, WebM (up to 100MB)</div>
             <div className="text-xs text-slate-400">Generates standardized waveform, log-mel frequency distribution, and anomaly index.</div>
           </>
         )}
@@ -793,7 +856,7 @@ export function Reports({ search, setSearch, onOpen, activities = [], currentUse
   );
 }
 
-export function IncomingCall({ caller, onAccept, onDecline }) {
+export function IncomingCall({ caller = {}, onAccept, onDecline }) {
   const [secondsLeft, setSecondsLeft] = useState(25);
 
   useEffect(() => {
@@ -813,14 +876,14 @@ export function IncomingCall({ caller, onAccept, onDecline }) {
         <div className="relative mx-auto w-36 h-36 mb-6">
           <div className="absolute inset-0 rounded-full bg-emerald-400/20 animate-ping" />
           <div className="neu-icon-green relative w-36 h-36 rounded-full flex items-center justify-center text-5xl font-extrabold text-emerald-600 shadow-xl">
-            {caller.initials || caller.name?.charAt(0) || "U"}
+            {caller?.initials || caller?.name?.charAt(0) || "U"}
           </div>
         </div>
 
-        <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">{caller.name}</h2>
-        <p className="text-slate-500 text-sm mt-1">{caller.phone}</p>
+        <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">{caller?.name || "Incoming Caller"}</h2>
+        <p className="text-slate-500 text-sm mt-1">{caller?.phone || ""}</p>
         <span className="inline-block mt-3 px-4 py-1 rounded-full text-xs font-semibold neu-icon-blue text-blue-600">
-          {caller.role || "Platform Member"}
+          {caller?.role || "Platform Member"}
         </span>
 
         <div className="flex items-center justify-center gap-14 mt-10">

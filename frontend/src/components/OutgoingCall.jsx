@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { PhoneOff, Phone, Radio, AlertTriangle } from "lucide-react";
 
-export default function OutgoingCall({ callee, onCancel, onSimulate, isOffline }) {
+export default function OutgoingCall({ callee = {}, onCancel, onSimulate, isOffline }) {
   const [seconds, setSeconds] = useState(0);
 
   useEffect(() => {
@@ -28,14 +28,14 @@ export default function OutgoingCall({ callee, onCancel, onSimulate, isOffline }
         <div className="relative my-6">
           <div className="absolute inset-0 rounded-full bg-blue-400/20 animate-ping scale-125" />
           <div className="neu-icon-blue w-36 h-36 rounded-full flex items-center justify-center text-5xl font-bold text-blue-600 relative z-10">
-            {callee.initials || "U"}
+            {callee?.initials || "U"}
           </div>
         </div>
 
-        <h2 className="text-2xl font-bold text-slate-900 mt-2">{callee.name}</h2>
-        <div className="text-slate-500 text-sm mt-1">{callee.phone}</div>
+        <h2 className="text-2xl font-bold text-slate-900 mt-2">{callee?.name || "Platform Contact"}</h2>
+        <div className="text-slate-500 text-sm mt-1">{callee?.phone || ""}</div>
         <div className="neu-inset px-4 py-1.5 rounded-full text-xs font-medium text-slate-600 mt-3">
-          {callee.role || "Platform Member"}
+          {callee?.role || "Platform Member"}
         </div>
 
         {isOffline ? (
@@ -44,7 +44,7 @@ export default function OutgoingCall({ callee, onCancel, onSimulate, isOffline }
             <div>
               <div className="font-semibold text-amber-800">User not currently online on another device</div>
               <p className="mt-0.5 text-amber-700/90">
-                To test live multi-device calls, log in as <b>{callee.name}</b> in another browser window. Or click below to test the AI voice forensics with your microphone right now.
+                To test live multi-device calls, log in as <b>{callee?.name || "this user"}</b> in another browser window. Or click below to test the AI voice forensics with your microphone right now.
               </p>
               <button
                 onClick={onSimulate}
@@ -55,9 +55,17 @@ export default function OutgoingCall({ callee, onCancel, onSimulate, isOffline }
             </div>
           </div>
         ) : (
-          <p className="text-xs text-slate-400 my-6">
-            Ringing user's browser. If not answered within 25 seconds, the call will automatically cut off and be recorded as missed.
-          </p>
+          <div className="my-6 flex flex-col items-center gap-3">
+            <p className="text-xs text-slate-400">
+              Ringing user's browser. If not answered within 25 seconds, the call will automatically cut off and be recorded as missed.
+            </p>
+            <button
+              onClick={onSimulate}
+              className="neu-card-sm neu-press px-4 py-1.5 rounded-full text-xs font-semibold text-blue-600 inline-flex items-center gap-1.5 hover:text-blue-700"
+            >
+              <Phone size={13} /> Connect Call Directly (Test Mode)
+            </button>
+          </div>
         )}
 
         <div className="flex flex-col items-center gap-2 mt-2">

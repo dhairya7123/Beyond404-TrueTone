@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  Home, Users, UploadCloud, BarChart3, Search, ChevronDown, LogOut, X, AlertCircle
+  Home, Users, UploadCloud, BarChart3, Search, ChevronDown, LogOut, X, AlertCircle, Terminal
 } from "lucide-react";
 
 import AuthScreen, { AuthLogo } from "./components/AuthScreen";
@@ -8,7 +8,10 @@ import ContactsView from "./components/ContactsView";
 import CallProgress from "./components/CallProgress";
 import DashboardView from "./components/DashboardView";
 import OutgoingCall from "./components/OutgoingCall";
+import ErrorBoundary from "./components/ErrorBoundary";
+import LogsModal from "./components/LogsModal";
 import { UploadAudio, ResultView, Reports, IncomingCall } from "./components/MediaViews";
+import logger from "./utils/logger";
 
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: Home },
@@ -28,7 +31,7 @@ function getInitials(name) {
     .toUpperCase();
 }
 
-function Sidebar({ page, go }) {
+function Sidebar({ page, go, onOpenLogs }) {
   const active = ["dashboard", "outgoingCall", "incomingCall", "callProgress"].includes(page)
     ? "dashboard"
     : ["upload", "uploadResult"].includes(page)
@@ -69,7 +72,15 @@ function Sidebar({ page, go }) {
           );
         })}
       </nav>
-      <div className="mt-auto pt-6 border-t border-white/60">
+
+      <div className="mt-auto pt-4 space-y-2 border-t border-white/60">
+        <button
+          onClick={onOpenLogs}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:text-blue-600 hover:bg-white/40 transition-all"
+        >
+          <Terminal size={14} className="text-blue-600" />
+          <span>View System Logs</span>
+        </button>
         <div className="flex items-center gap-2 text-xs text-emerald-600 font-semibold px-2">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           Gateway Active :8080
@@ -79,7 +90,7 @@ function Sidebar({ page, go }) {
   );
 }
 
-function Topbar({ search, setSearch, placeholder, user, onLogout }) {
+function Topbar({ search, setSearch, placeholder, user, onLogout, onOpenLogs }) {
   const [profOpen, setProfOpen] = useState(false);
   const name = user?.name || "Analyst";
   const role = user?.role || "Platform Member";
@@ -96,6 +107,16 @@ function Topbar({ search, setSearch, placeholder, user, onLogout }) {
           className="neu-inset w-full pl-[52px] pr-5 py-3.5 rounded-full text-sm text-slate-700 placeholder:text-slate-400 outline-none border-none"
         />
       </div>
+
+      <button
+        onClick={onOpenLogs}
+        className="neu-card-sm neu-press hidden sm:flex items-center gap-2 px-4 py-2.5 rounded-full text-xs font-bold text-slate-700 hover:text-blue-600"
+        title="Open Application & Forensic Logs"
+      >
+        <Terminal size={14} className="text-blue-600" />
+        <span>System Logs</span>
+      </button>
+
       <div className="relative">
         <button
           onClick={() => setProfOpen((v) => !v)}
@@ -119,6 +140,15 @@ function Topbar({ search, setSearch, placeholder, user, onLogout }) {
             </div>
             <div className="px-3 py-2 rounded-xl text-slate-600 text-xs">
               Role: <span className="font-semibold text-slate-800">{role}</span>
+            </div>
+            <div
+              onClick={() => {
+                setProfOpen(false);
+                onOpenLogs();
+              }}
+              className="px-3 py-2 rounded-xl hover:bg-white/50 text-slate-700 cursor-pointer flex items-center gap-2 text-xs font-semibold"
+            >
+              <Terminal size={14} className="text-blue-600" /> System Logs
             </div>
             <div
               onClick={() => {
@@ -153,6 +183,7 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [activities, setActivities] = useState([]);
+  const [showLogsModal, setShowLogsModal] = useState(false);
 
   // Active call state
   const [activeCall, setActiveCall] = useState(null);
@@ -162,17 +193,27 @@ export default function App() {
 
   const wsRef = useRef(null);
 
+  // Initial client boot log
+  useEffect(() => {
+    logger.info("App", "Beyond404 frontend client mounted and initialized.");
+    if (user) {
+      logger.info("Auth", `Active session restored for ${user.name} (#${user.id}, ${user.role})`);
+    }
+  }, []);
+
   // Fetch platform users
   async function fetchPlatformUsers() {
     setLoadingUsers(true);
     try {
+      logger.debug("Data", "Fetching platform users from Supabase...");
       const res = await fetch("/api/users");
       const data = await res.json();
       if (data.success && Array.isArray(data.users)) {
         setUsers(data.users);
+        logger.info("Data", `Loaded ${data.users.length} platform users.`);
       }
     } catch (err) {
-      console.error("Failed to fetch users:", err);
+      logger.error("Data", "Failed to fetch users: " + err.message);
     } finally {
       setLoadingUsers(false);
     }
@@ -182,13 +223,15 @@ export default function App() {
   async function fetchActivities() {
     if (!user?.id) return;
     try {
+      logger.debug("Data", `Fetching activity logs for user #${user.id}...`);
       const res = await fetch(`/api/activity?userId=${user.id}`);
       const data = await res.json();
       if (data.success && Array.isArray(data.activities)) {
         setActivities(data.activities);
+        logger.info("Data", `Retrieved ${data.activities.length} activity audit records.`);
       }
     } catch (err) {
-      console.error("Failed to fetch activities:", err);
+      logger.error("Data", "Failed to fetch activities: " + err.message);
     }
   }
 
@@ -209,11 +252,12 @@ export default function App() {
 
     let ws = null;
     try {
+      logger.info("Signaling", `Connecting WebSocket signaling to ${wsUrl}...`);
       ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log(`[WS] Connected as ${user.name} (ID #${user.id})`);
+        logger.info("Signaling", `WebSocket connected successfully as ${user.name} (ID #${user.id})`);
         ws.send(JSON.stringify({ type: "register", userId: user.id, userName: user.name }));
       };
 
@@ -223,7 +267,7 @@ export default function App() {
 
           // 1. Incoming Call Event (Other user is calling this user)
           if (data.type === "incoming_call") {
-            console.log("[CALL] Incoming call from:", data.caller);
+            logger.info("Signaling", `Incoming call detected from ${data.caller?.name} (${data.caller?.phone})`, data.caller);
             setActiveCall({
               id: data.call_id,
               role: "callee",
@@ -235,25 +279,28 @@ export default function App() {
 
           // 2. Callee is offline
           else if (data.type === "callee_offline") {
+            logger.warn("Signaling", `Callee is offline on other devices. Allowing test simulation.`);
             setIsCalleeOffline(true);
           }
 
           // 3. Callee accepted
           else if (data.type === "call_accepted") {
-            console.log("[CALL] Callee accepted call!");
+            logger.info("Signaling", `Callee accepted call! Transitioning to live call progress.`);
             setPage("callProgress");
           }
 
           // 4. Callee declined
           else if (data.type === "call_declined") {
+            logger.warn("Signaling", "Call declined by recipient.");
             setCallToast("The call was declined.");
             setActiveCall(null);
             setPage("dashboard");
             fetchActivities();
           }
 
-          // 5. Call timeout (unanswered after 25s) -> auto cut
+          // 5. Call timed out
           else if (data.type === "call_timeout") {
+            logger.warn("Signaling", "Call timed out with no answer.");
             setCallToast("Call timed out. No answer.");
             setActiveCall(null);
             setPage("dashboard");
@@ -262,78 +309,89 @@ export default function App() {
 
           // 6. Call ended by other party
           else if (data.type === "call_ended") {
+            logger.info("Signaling", "Call ended by remote party.");
             setCallToast("Call ended.");
             setActiveCall(null);
+            setLiveTelemetry(null);
             setPage("dashboard");
             fetchActivities();
           }
 
-          // 7. Real-time telemetry
-          else if (data.type === "telemetry" || data.score !== undefined) {
+          // 7. Live WebRTC Telemetry stream from ONNX inference
+          else if (data.type === "telemetry") {
             setLiveTelemetry(data);
           }
         } catch (e) {
-          console.error("WS message error", e);
+          logger.error("Signaling", "Error handling websocket message: " + e.message);
         }
       };
+
+      ws.onclose = () => {
+        logger.warn("Signaling", "WebSocket connection closed.");
+      };
+
+      ws.onerror = (err) => {
+        logger.error("Signaling", "WebSocket error: " + (err.message || "Connection error"));
+      };
     } catch (err) {
-      console.warn("WebSocket init error", err);
+      logger.error("Signaling", "WebSocket setup exception: " + err.message);
     }
 
     return () => {
       if (ws) {
-        try {
-          ws.close();
-        } catch (_) {}
+        ws.close();
       }
     };
   }, [user]);
 
-  function handleLogin(loggedInUser) {
-    setUser(loggedInUser);
-    localStorage.setItem("beyond404_user", JSON.stringify(loggedInUser));
-    setPage("dashboard");
+  function handleLogin(loggedUser) {
+    logger.info("Auth", `User logged in successfully: ${loggedUser.name} (#${loggedUser.id})`);
+    setUser(loggedUser);
+    try {
+      localStorage.setItem("beyond404_user", JSON.stringify(loggedUser));
+    } catch (_) {}
   }
 
   function handleLogout() {
+    logger.info("Auth", `User logged out: ${user?.name}`);
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
     setUser(null);
-    localStorage.removeItem("beyond404_user");
+    try {
+      localStorage.removeItem("beyond404_user");
+    } catch (_) {}
+    setActiveCall(null);
+    setLiveTelemetry(null);
+    setPage("dashboard");
   }
 
-  function go(p) {
-    setSearch("");
-    setPage(p);
-  }
-
-  // Caller initiates call to Callee
+  // Initiate outgoing call to another platform user
   function startCall(name, phone, initials, role) {
-    const target = users.find((u) => u.phone === phone || u.name === name) || {
-      name,
-      phone,
-      initials,
-      role,
-    };
-    const callId = `call_${Date.now()}`;
     const callerData = {
-      id: user.id,
-      name: user.name,
-      phone: user.phone,
-      role: user.role,
-      initials: getInitials(user.name),
-    };
-    const calleeData = {
-      id: target.id,
-      name: target.name,
-      phone: target.phone,
-      role: target.role,
-      initials: target.initials || getInitials(target.name),
+      id: user?.id || 1,
+      name: user?.name || "Anonymous Analyst",
+      phone: user?.phone || "+91 00000 00000",
+      initials: getInitials(user?.name),
+      role: user?.role || "Analyst",
     };
 
+    const targetUser = users.find((u) => u.phone === phone || u.name === name);
+    const calleeData = {
+      id: targetUser ? targetUser.id : null,
+      name: name || "Unknown User",
+      phone: phone || "+91 00000 00000",
+      initials: initials || getInitials(name),
+      role: role || targetUser?.role || "Contact",
+    };
+
+    const callId = `call_${Date.now()}`;
+    logger.info("Signaling", `Initiating call to ${calleeData.name} (${calleeData.phone}) [Call ID: ${callId}]`);
     setActiveCall({
       id: callId,
       role: "caller",
       otherParty: calleeData,
-      status: "ringing",
+      status: "calling",
     });
     setIsCalleeOffline(false);
     setPage("outgoingCall");
@@ -347,12 +405,15 @@ export default function App() {
           callee: calleeData,
         })
       );
+    } else {
+      logger.warn("Signaling", "WebSocket not open. Setting offline mode.");
+      setIsCalleeOffline(true);
     }
   }
 
-  // Caller cancels outgoing call
   function cancelOutgoingCall() {
-    if (activeCall?.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    logger.info("Signaling", "Outgoing call cancelled by caller.");
+    if (activeCall && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: "call_end",
@@ -364,18 +425,31 @@ export default function App() {
       );
     }
     setActiveCall(null);
+    setIsCalleeOffline(false);
     setPage("dashboard");
-    fetchActivities();
   }
 
-  // Caller chooses to simulate forensics directly with microphone
   function simulateCallDirectly() {
+    logger.info("Simulation", "Direct Forensics Mode connected. Simulating live audio stream.");
+    if (!activeCall) {
+      setActiveCall({
+        id: `call_sim_${Date.now()}`,
+        role: "caller",
+        otherParty: {
+          name: "Direct Forensics Mode",
+          phone: "Local Microphone Track",
+          initials: "AI",
+          role: "Voice Forensics Stream",
+        },
+        status: "in_progress",
+      });
+    }
     setPage("callProgress");
   }
 
-  // Callee accepts incoming call
   function acceptIncomingCall() {
-    if (activeCall?.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    logger.info("Signaling", `Incoming call ${activeCall?.id} accepted.`);
+    if (activeCall && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: "call_accept",
@@ -386,9 +460,9 @@ export default function App() {
     setPage("callProgress");
   }
 
-  // Callee declines incoming call
   function declineIncomingCall() {
-    if (activeCall?.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    logger.info("Signaling", `Incoming call ${activeCall?.id} declined.`);
+    if (activeCall && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: "call_decline",
@@ -401,22 +475,29 @@ export default function App() {
     fetchActivities();
   }
 
-  // Either party ends active call
   function handleEndCall(duration, score, riskTier) {
-    if (activeCall?.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    logger.info("Signaling", `Call ended: Duration=${duration}s, Score=${score}%, Tier=${riskTier}`);
+    if (activeCall && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: "call_end",
           call_id: activeCall.id,
-          duration: duration || 0,
-          score: score || 20,
-          risk_tier: riskTier || "Low Risk",
+          duration,
+          score,
+          risk_tier: riskTier,
         })
       );
     }
     setActiveCall(null);
+    setLiveTelemetry(null);
     setPage("dashboard");
     fetchActivities();
+  }
+
+  function go(p) {
+    logger.debug("Nav", `Navigated to view: ${p}`);
+    setSearch("");
+    setPage(p);
   }
 
   if (!user) {
@@ -424,30 +505,19 @@ export default function App() {
   }
 
   const placeholders = {
-    dashboard: "Search your calls, activities, or contacts...",
-    contacts: "Search platform users by name, phone, or role...",
-    reports: "Search forensic activity reports...",
-    upload: "Search contacts, cases, or audio files...",
+    dashboard: "Search calls, logs, reports...",
+    contacts: "Search contacts by name, role or tag...",
+    upload: "Search uploaded audio files...",
+    reports: "Search forensic analysis reports...",
   };
 
-  let body;
-  if (page === "dashboard") {
-    body = (
-      <DashboardView
-        go={go}
-        startCall={startCall}
-        user={user}
-        contactsCount={users.length}
-        activities={activities}
-      />
-    );
-  } else if (page === "contacts") {
+  let body = null;
+  if (page === "contacts") {
     body = (
       <ContactsView
         search={search}
         setSearch={setSearch}
         startCall={startCall}
-        currentUser={user}
         users={users}
         loading={loadingUsers}
         onRefresh={fetchPlatformUsers}
@@ -456,11 +526,18 @@ export default function App() {
   } else if (page === "upload") {
     body = (
       <UploadAudio
+        search={search}
+        setSearch={setSearch}
         currentUser={user}
-        onAnalyzed={(d) => {
-          setUploadResult(d);
+        onAnalyze={(res) => {
+          logger.info("AudioAnalysis", `Audio file analyzed: ${res.name}, score: ${res.score}%`);
+          setUploadResult(res);
           go("uploadResult");
-          fetchActivities();
+        }}
+        onAnalyzed={(res) => {
+          logger.info("AudioAnalysis", `Audio file analyzed: ${res.name}, score: ${res.score}%`);
+          setUploadResult(res);
+          go("uploadResult");
         }}
       />
     );
@@ -507,10 +584,17 @@ export default function App() {
         onDecline={declineIncomingCall}
       />
     );
-  } else if (page === "callProgress" && activeCall) {
+  } else if (page === "callProgress") {
     body = (
       <CallProgress
-        caller={activeCall.otherParty}
+        caller={
+          activeCall?.otherParty || {
+            name: "Direct Forensics Mode",
+            phone: "Local Microphone Track",
+            initials: "AI",
+            role: "Voice Forensics Stream",
+          }
+        }
         onEnd={handleEndCall}
         liveTelemetry={liveTelemetry}
       />
@@ -531,10 +615,17 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex text-slate-900" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
-      <Sidebar page={page} go={go} />
+      <Sidebar page={page} go={go} onOpenLogs={() => setShowLogsModal(true)} />
       <main className="flex-1 min-w-0 px-5 sm:px-8 py-7 lg:pl-[calc(290px+2rem)] max-w-[1740px] mx-auto w-full">
-        <div className="lg:hidden mb-6">
+        <div className="lg:hidden mb-6 flex items-center justify-between">
           <AuthLogo />
+          <button
+            onClick={() => setShowLogsModal(true)}
+            className="neu-card-sm px-3 py-1.5 rounded-full text-xs font-bold text-slate-700 flex items-center gap-1.5"
+          >
+            <Terminal size={14} className="text-blue-600" />
+            Logs
+          </button>
         </div>
 
         {callToast && (
@@ -556,6 +647,7 @@ export default function App() {
             placeholder={placeholders[page]}
             user={user}
             onLogout={handleLogout}
+            onOpenLogs={() => setShowLogsModal(true)}
           />
         ) : (
           <div className="flex justify-end mb-8">
@@ -565,11 +657,16 @@ export default function App() {
               placeholder=""
               user={user}
               onLogout={handleLogout}
+              onOpenLogs={() => setShowLogsModal(true)}
             />
           </div>
         )}
 
-        {body}
+        <ErrorBoundary onReset={() => setPage("dashboard")}>
+          {body}
+        </ErrorBoundary>
+
+        <LogsModal isOpen={showLogsModal} onClose={() => setShowLogsModal(false)} />
 
         <div className="neu-card lg:hidden mt-8 flex justify-around p-3 sticky bottom-4">
           {NAV.map((n) => {

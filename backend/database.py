@@ -2,6 +2,9 @@ import os
 import hashlib
 import asyncpg
 from typing import Optional, List, Dict, Any
+from logger import get_logger, log_audit_event
+
+logger = get_logger("Database")
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -18,44 +21,28 @@ _pool: Optional[asyncpg.Pool] = None
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+        logger.info("Initializing asyncpg connection pool to Supabase...")
+        try:
+            _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+            logger.info("Database connection pool established successfully.")
+        except Exception as e:
+            logger.error("Failed to establish database connection pool: %s", e)
+            raise
     return _pool
 
 async def init_db():
+    logger.info("Running database schema synchronization...")
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS public.users (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                email VARCHAR(255) UNIQUE NOT NULL,
-                phone VARCHAR(50) UNIQUE NOT NULL,
-                password_hash VARCHAR(255) NOT NULL,
-                role VARCHAR(100) DEFAULT 'Analyst',
-                tag VARCHAR(50) DEFAULT 'Personal',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        ''')
+            CREATE TABLE IF NOT EXISTS public.users (\n                id SERIAL PRIMARY KEY,\n                name VARCHAR(255) NOT NULL,\n                email VARCHAR(255) UNIQUE NOT NULL,\n                phone VARCHAR(50) UNIQUE NOT NULL,\n                password_hash VARCHAR(255) NOT NULL,\n                role VARCHAR(100) DEFAULT 'Analyst',\n                tag VARCHAR(50) DEFAULT 'Personal',\n                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP\n            );\n        ''')
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS public.call_activities (
-                id SERIAL PRIMARY KEY,
-                caller_id INT REFERENCES public.users(id) ON DELETE SET NULL,
-                caller_name VARCHAR(255) NOT NULL,
-                caller_phone VARCHAR(50) NOT NULL,
-                callee_id INT REFERENCES public.users(id) ON DELETE SET NULL,
-                callee_name VARCHAR(255) NOT NULL,
-                callee_phone VARCHAR(50) NOT NULL,
-                status VARCHAR(50) NOT NULL,
-                duration INT DEFAULT 0,
-                fraud_score INT DEFAULT 0,
-                risk_tier VARCHAR(50) DEFAULT 'Low Risk',
-                flagged BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        ''')
+            CREATE TABLE IF NOT EXISTS public.call_activities (\n                id SERIAL PRIMARY KEY,\n                caller_id INT REFERENCES public.users(id) ON DELETE SET NULL,\n                caller_name VARCHAR(255) NOT NULL,\n                caller_phone VARCHAR(50) NOT NULL,\n                callee_id INT REFERENCES public.users(id) ON DELETE SET NULL,\n                callee_name VARCHAR(255) NOT NULL,\n                callee_phone VARCHAR(50) NOT NULL,\n                status VARCHAR(50) NOT NULL,\n                duration INT DEFAULT 0,\n                fraud_score INT DEFAULT 0,\n                risk_tier VARCHAR(50) DEFAULT 'Low Risk',\n                flagged BOOLEAN DEFAULT FALSE,\n                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP\n            );\n        ''')
 
         count = await conn.fetchval('SELECT COUNT(*) FROM public.users;')
+        logger.info("Database schema verified. Active user count: %d", count)
         if count == 0:
+            logger.info("Seeding initial platform users into Supabase...")
             sample_users = [
                 ('Sanin CP', 'sanin@beyond404.ai', '+91 98765 43210', hash_password('password123'), 'Senior Analyst', 'Personal'),
                 ('Alex Thomas', 'alex@beyond404.ai', '+91 98765 00001', hash_password('password123'), 'Security Officer', 'Personal'),
@@ -69,6 +56,7 @@ async def init_db():
                     'INSERT INTO public.users (name, email, phone, password_hash, role, tag) VALUES ($1, $2, $3, $4, $5, $6)',
                     *u
                 )
+            logger.info("Seeded %d platform test users.", len(sample_users))
 
 async def create_user(name: str, email: str, phone: str, password: str, role: str = "Analyst", tag: str = "Personal") -> Dict[str, Any]:
     pool = await get_pool()
@@ -85,6 +73,8 @@ async def create_user(name: str, email: str, phone: str, password: str, role: st
         d = dict(row)
         if d.get("created_at"):
             d["created_at"] = d["created_at"].isoformat()
+        logger.info("New user registered: %s (ID: #%s, Role: %s)", d["name"], d["id"], d["role"])
+        log_audit_event("USER_REGISTERED", {"user_id": d["id"], "name": d["name"], "email": d["email"], "role": d["role"]})
         return d
 
 async def authenticate_user(identifier: str, password: str) -> Optional[Dict[str, Any]]:
@@ -101,13 +91,20 @@ async def authenticate_user(identifier: str, password: str) -> Optional[Dict[str
             ident, identifier.strip()
         )
         if not row:
+            logger.warn("Authentication failed: Identifier not found (%s)", ident)
+            log_audit_event("AUTH_FAILED", {"identifier": ident, "reason": "User not found"})
             return None
         if row['password_hash'] != pw_hash:
+            logger.warn("Authentication failed: Password mismatch for user %s (ID: #%s)", row['name'], row['id'])
+            log_audit_event("AUTH_FAILED", {"user_id": row["id"], "identifier": ident, "reason": "Bad password"})
             return None
+
         user = dict(row)
         del user['password_hash']
         if user.get("created_at"):
             user["created_at"] = user["created_at"].isoformat()
+        logger.info("Authentication successful for %s (ID: #%s, Role: %s)", user["name"], user["id"], user["role"])
+        log_audit_event("AUTH_SUCCESS", {"user_id": user["id"], "name": user["name"], "role": user["role"]})
         return user
 
 async def get_all_users() -> List[Dict[str, Any]]:
@@ -126,6 +123,7 @@ async def get_all_users() -> List[Dict[str, Any]]:
             if d.get("created_at"):
                 d["created_at"] = d["created_at"].isoformat()
             res.append(d)
+        logger.debug("Fetched %d platform users from Supabase.", len(res))
         return res
 
 async def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
@@ -179,6 +177,21 @@ async def record_call_activity(
         d = dict(row)
         if d.get("created_at"):
             d["created_at"] = d["created_at"].isoformat()
+
+        logger.info(
+            "Recorded call activity #%s: %s -> %s | Status: %s | Score: %d%% | Tier: %s | Flagged: %s",
+            d["id"], caller_name, callee_name, status, fraud_score, risk_tier, flagged
+        )
+        log_audit_event("CALL_ACTIVITY_SAVED", {
+            "activity_id": d["id"],
+            "caller": caller_name,
+            "callee": callee_name,
+            "status": status,
+            "duration": duration,
+            "fraud_score": fraud_score,
+            "risk_tier": risk_tier,
+            "flagged": flagged
+        })
         return d
 
 async def get_user_activities(user_id: int) -> List[Dict[str, Any]]:
@@ -201,4 +214,5 @@ async def get_user_activities(user_id: int) -> List[Dict[str, Any]]:
             if d.get("created_at"):
                 d["created_at"] = d["created_at"].isoformat()
             res.append(d)
+        logger.debug("Fetched %d activity records for user #%d", len(res), user_id)
         return res
